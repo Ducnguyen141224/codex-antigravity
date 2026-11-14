@@ -1,0 +1,12 @@
+.venv/
+.venv-store/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+dist/
+.env
+config.yaml
+.runtime/
+plugins/antigravity/skills/agy/runtime.json

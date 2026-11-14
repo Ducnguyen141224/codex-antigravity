@@ -1,0 +1,12 @@
+{
+  "name": "antigravity",
+  "version": "0.1.0",
+  "description": "Delegate an explicitly requested coding task to Antigravity with Codex review.",
+  "skills": "./skills/",
+  "requires_local_executor": true,
+  "interface": {
+    "displayName": "Antigravity",
+    "shortDescription": "Run explicitly requested AGY tasks.",
+    "longDescription": "Use the locally installed Codex AGY Supervisor to plan, run, and independently review coding tasks."
+  }
+}

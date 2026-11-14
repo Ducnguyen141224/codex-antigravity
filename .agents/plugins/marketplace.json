@@ -1,0 +1,20 @@
+{
+  "name": "agy-local",
+  "interface": {
+    "displayName": "AGY Local"
+  },
+  "plugins": [
+    {
+      "name": "antigravity",
+      "source": {
+        "source": "local",
+        "path": "./plugins/antigravity"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

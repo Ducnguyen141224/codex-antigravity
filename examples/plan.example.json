@@ -1,0 +1,83 @@
+{
+  "plan": {
+    "plan_id": "hello-example",
+    "plan_version": 1,
+    "project_path": "D:/projects/example",
+    "project_context": "Python project. Inspected HEAD and existing tests.",
+    "user_goal": "Add a greeting function.",
+    "functional_requirements": [
+      "greet() returns hello"
+    ],
+    "nonfunctional_requirements": [
+      "Standard library only"
+    ],
+    "scope": [
+      "hello.py"
+    ],
+    "out_of_scope": [
+      "Deployment"
+    ],
+    "constraints": [
+      "Preserve existing files"
+    ],
+    "architecture_decisions": [
+      "One module"
+    ],
+    "milestones": [
+      {
+        "milestone_id": "greeting",
+        "title": "Greeting",
+        "description": "Implement greet()",
+        "dependencies": []
+      }
+    ],
+    "tasks": [
+      {
+        "task_id": "greet",
+        "milestone_id": "greeting",
+        "title": "Add hello.py",
+        "description": "Implement greet() without side effects",
+        "objective": "Return hello",
+        "implementation_steps": [
+          "Create hello.py",
+          "Verify greet() returns hello"
+        ],
+        "expected_files": [
+          "hello.py"
+        ],
+        "dependencies": [],
+        "acceptance_criteria": [
+          "greet() returns hello"
+        ],
+        "verification_commands": [
+          {
+            "argv": [
+              "python",
+              "-B",
+              "-c",
+              "from hello import greet; assert greet() == 'hello'"
+            ]
+          }
+        ],
+        "estimated_complexity": "low",
+        "risk_level": "low"
+      }
+    ],
+    "dependencies": [],
+    "expected_files": [
+      "hello.py"
+    ],
+    "implementation_steps": [
+      "Implement greeting milestone"
+    ],
+    "acceptance_criteria": [
+      "Verification passes"
+    ],
+    "verification_commands": [],
+    "risk_assessment": "One small module",
+    "definition_of_done": [
+      "Codex independently reviews and accepts"
+    ]
+  },
+  "idempotency_key": "hello-example-v1"
+}

@@ -1,0 +1,16 @@
+port: 18765
+agy_executable: agy
+# Optional ACP model ID from the session model selector.
+# agy_model: gemini-3.8-flash
+sandbox: true
+workers: 2
+max_review_rounds: 3
+startup_seconds: 35
+idle_seconds: 300
+hard_seconds: 1800
+permission_seconds: 120
+verification_seconds: 240
+max_wait_seconds: 45
+# The Windows installer fills in an absolute data_dir for background launches.
+# data_dir: C:/path/to/CodexAgySupervisor
+# allowed_roots: ["D:/Projects"]
