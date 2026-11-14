@@ -9,9 +9,9 @@ from conftest import plan_for
 from mcp import ClientSession as McpSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-from codex_agy import acp_client
+from codex_agy import acp_client, verification
 from codex_agy.api import TOOLS
-from codex_agy.cli import serve
+from codex_agy.cli import serve, wait_for_review
 from codex_agy.ipc import call
 from codex_agy.process import capture
 from codex_agy.workspace import text
@@ -162,6 +162,13 @@ async def test_worktree_review_gate_and_idempotency(settings, server, repo):
     review = await invoke(settings, "get_review_context", task_id=first["task_id"])
     assert review["changed_files"] == ["hello0.py"]
     assert review["verification_results"][0]["result"] == "PASSED"
+    assert review["verification_results"][0]["revision"] == review["review_revision"]
+    assert review["verification_valid_for_revision"]
+    assert await invoke(settings, "get_review_context", task_id=first["task_id"]) == review
+    outcome = await invoke(settings, "get_task_result", task_id=first["task_id"])
+    assert outcome["result"] == {"stop_reason": "end_turn"}
+    assert outcome["review"] == {"changed_file_count": 1, "verification_counts": {"PASSED": 1}}
+    assert "events" not in outcome
     accepted = await invoke(
         settings,
         "accept_milestone",
@@ -171,6 +178,7 @@ async def test_worktree_review_gate_and_idempotency(settings, server, repo):
     )
     next_status = await finished(settings, accepted["next_task_id"])
     assert next_status["status"] == "REVIEW_REQUIRED", next_status
+    assert next_status["plan_version"] == first_status["plan_version"]
     assert (Path(first["workspace_path"]) / "hello0.py").is_file()
     assert not (repo / "hello0.py").exists()
 
@@ -192,6 +200,12 @@ async def test_fix_snapshot_and_failed_verification(settings, server, repo):
     fixed = await finished(settings, task_id)
     assert fixed["status"] == "REVIEW_REQUIRED", fixed
     assert old != fixed["review_revision"]
+    old_summary = await invoke(settings, "get_review_context", task_id=task_id, review_revision=old)
+    new_summary = await invoke(settings, "get_review_context", task_id=task_id)
+    assert old_summary["verification_results"][0]["revision"] == old
+    assert old_summary["verification_results"][0]["result"] == "PASSED"
+    assert new_summary["verification_results"][0]["revision"] == fixed["review_revision"]
+    assert new_summary["verification_results"][0]["result"] == "FAILED"
     delta = await invoke(settings, "get_review_context", task_id=task_id, view="fix_diff")
     assert "hello again" in delta["content"]
     previous = await invoke(
@@ -237,12 +251,49 @@ async def test_fix_snapshot_and_failed_verification(settings, server, repo):
     assert changed["error"]["code"] == "WORKTREE_CHANGED"
 
 
+async def test_changed_worktree_invalidates_verification(settings, server, repo, monkeypatch):
+    original_verify = verification.verify
+
+    async def verify_then_modify(commands, cwd, artifacts, revision, timeout):
+        results = await original_verify(commands, cwd, artifacts, revision, timeout)
+        (cwd / "generated.txt").write_text("changed during verification", encoding="utf-8")
+        return results
+
+    monkeypatch.setattr(verification, "verify", verify_then_modify)
+    execution = await submit(settings, plan_for(repo))
+    task_id = execution["task_id"]
+    review = await finished(settings, task_id)
+    assert review["status"] == "REVIEW_REQUIRED"
+    snapshot = await invoke(settings, "get_review_context", task_id=task_id)
+    assert not snapshot["verification_valid_for_revision"]
+    assert snapshot["verification_results"][0]["result"] == "PASSED"
+    (Path(execution["workspace_path"]) / "generated.txt").unlink()
+
+    result = await call(
+        settings,
+        "accept_milestone",
+        {
+            "task_id": task_id,
+            "review_revision": review["review_revision"],
+            "review_summary": "Attempt to accept the previous verification.",
+        },
+    )
+    assert result["error"]["code"] == "VERIFICATION_STALE"
+
+
 async def test_permission_and_cancellation(settings, server, repo):
+    settings.max_wait_seconds = 1
     plan = plan_for(repo)
     plan["user_goal"] = "permission"
     task_id = (await submit(settings, plan))["task_id"]
-    waiting = await finished(settings, task_id)
+    pending = await wait_for_review(settings, task_id, 0)
+    assert pending["data"]["status"] in {"PENDING", "WAITING_PERMISSION"}
+    result = await wait_for_review(settings, task_id, 20)
+    assert result["ok"], result
+    waiting = result["data"]
     assert waiting["status"] == "WAITING_PERMISSION", waiting
+    paused = await invoke(settings, "get_task_result", task_id=task_id)
+    assert "result" not in paused and "events" not in paused
     invalid = await call(
         settings,
         "respond_permission",
@@ -290,6 +341,7 @@ async def test_recovery_and_timeout(settings, server, repo):
             settings, "retry_task", task_id=task_id, reason="Inspected retained fixture."
         )
         assert retried["retry_count"] == 1
+        settings.idle_seconds = 2
         timed_out = await finished(settings, task_id)
         assert timed_out["status"] == "TIMED_OUT", timed_out
     finally:

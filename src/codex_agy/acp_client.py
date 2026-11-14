@@ -22,7 +22,8 @@ class AgentEvents(Client):
         self.permission = permission
         self.activity = activity
         self.question = question
-        self.text = ""
+        self.partial_line = ""
+        self.quota_message = None
 
     async def request_permission(self, session_id, tool_call, options, **kwargs):
         return await self.permission(session_id, tool_call, options)
@@ -30,8 +31,20 @@ class AgentEvents(Client):
     async def session_update(self, session_id, update, **kwargs):
         kind = update.session_update
         if kind == "agent_message_chunk" and isinstance(update.content, TextContentBlock):
-            self.text = (self.text + update.content.text)[-8000:]
+            lines = (self.partial_line + update.content.text).split("\n")
+            self.partial_line = lines.pop()[:400]
+            self.check_quota(lines)
         await self.activity(kind)
+
+    def check_quota(self, lines: list[str]) -> None:
+        if self.quota_message is None:
+            for line in lines:
+                diagnostic = line.strip().lstrip("⚠️ ").casefold()
+                if diagnostic.startswith(
+                    ("individual quota reached.", "quota exhausted.", "rate limit exceeded.")
+                ):
+                    self.quota_message = line.strip()[:240]
+                    break
 
     async def create_elicitation(self, **kwargs):
         await self.question()
@@ -187,6 +200,8 @@ async def run_turn(
                     value=settings.agy_model,
                 )
         await on_session(session_id)
+        events.partial_line = ""
+        events.quota_message = None
         turn = asyncio.create_task(
             conn.prompt(session_id=session_id, prompt=[TextContentBlock(text=prompt)])
         )
@@ -200,6 +215,7 @@ async def run_turn(
             turn.cancel()
             await asyncio.gather(turn, return_exceptions=True)
             raise
+        events.check_quota([events.partial_line])
         if (
             capabilities
             and capabilities.session_capabilities
@@ -208,4 +224,6 @@ async def run_turn(
             with contextlib.suppress(TimeoutError, RequestError):
                 async with asyncio.timeout(3):
                     await conn.close_session(session_id=session_id)
-        return {"stop_reason": result.stop_reason, "summary": events.text}
+        if events.quota_message:
+            raise Problem("AGY_QUOTA", events.quota_message)
+        return {"stop_reason": result.stop_reason}

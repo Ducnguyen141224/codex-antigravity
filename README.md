@@ -83,6 +83,10 @@ Supervisor tiếp tục chạy khi đóng chat. Nếu Supervisor bị dừng gi�
 
 ## Theo dõi và review
 
+Codex lập một kế hoạch trước khi giao việc và giữ phiên bản đó trong các milestone và vòng sửa. Plugin ưu tiên tool MCP `agy_wait / wait_for_review` để chờ đến khi cần review, cần quyền hoặc task kết thúc. Một lời gọi được giữ tối đa 1800 giây, với timeout của host là 1860 giây. Supervisor theo dõi sự kiện ACP, còn `get_task_result` trả trạng thái và kết quả tóm tắt. Diff và kết quả kiểm thử được lưu theo revision. Codex đọc Git diff trước, giao AGY sửa các lỗi ảnh hưởng đến nghiệm thu, rồi xem `fix_diff` và kiểm tra nguy cơ hồi quy ở vòng sau.
+
+CLI `wait <task_id>` cũng giữ một kết nối HTTP theo sự kiện. Tuy nhiên, host shell hoặc code-mode có thể trả handle sau một khoảng ngắn và Codex cần thêm lượt model để tiếp tục đợi. Plugin hướng dẫn tăng `yield_time_ms` của code-mode khi host hỗ trợ. Cài lại plugin bằng `scripts\install_plugin.ps1` và mở chat mới để nạp tool MCP chờ. Xem [kết quả đo thực tế](WAITING_AUDIT.md) về số lượt model và token.
+
 `submit_plan` nhận đối tượng `plan` theo schema. Xem [kế hoạch mẫu](examples/plan.example.json) hoặc chạy `.\.venv\Scripts\python.exe -m codex_agy.cli schema submit_plan`. `execute_plan` lên lịch toàn bộ kế hoạch và chờ review giữa các milestone. `execute_milestone` chạy từng milestone qua cùng `execution_id`. `revise_plan` tạo phiên bản mới cho các execution sau.
 
 | Công việc | Thao tác |

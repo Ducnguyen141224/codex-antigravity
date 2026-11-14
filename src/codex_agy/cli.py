@@ -42,11 +42,17 @@ async def serve(settings):
             db.close()
 
 
+async def wait_for_review(settings, task_id, wait_seconds):
+    return await call(
+        settings, "wait_background", {"task_id": task_id, "timeout_seconds": wait_seconds}
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(prog="codex-agy")
     parser.add_argument("--config", type=Path)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "serve", "mcp", "health", "stop"):
+    for name in ("init", "serve", "mcp", "mcp-wait", "health", "stop"):
         sub.add_parser(name)
     probe = sub.add_parser("probe")
     probe.add_argument("--session", action="store_true")
@@ -55,6 +61,9 @@ def main():
     tool.add_argument("--json-file", type=Path)
     schema = sub.add_parser("schema")
     schema.add_argument("tool", choices=TOOLS)
+    wait = sub.add_parser("wait", help="Wait for the next actionable task status.")
+    wait.add_argument("task_id")
+    wait.add_argument("--seconds", type=int, default=1800, choices=range(1, 1801), metavar="1-1800")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if args.command == "schema":
@@ -79,10 +88,10 @@ def main():
             logging.getLogger().addHandler(handler)
             asyncio.run(serve(settings))
             return
-        elif args.command == "mcp":
+        elif args.command in {"mcp", "mcp-wait"}:
             from codex_agy.mcp_server import run
 
-            asyncio.run(run(settings))
+            asyncio.run(run(settings, wait_only=args.command == "mcp-wait"))
             return
         elif args.command == "probe":
             import tempfile
@@ -98,6 +107,8 @@ def main():
                 json.loads(args.json_file.read_text(encoding="utf-8-sig")) if args.json_file else {}
             )
             result = asyncio.run(call(settings, args.tool, payload))
+        elif args.command == "wait":
+            result = asyncio.run(wait_for_review(settings, args.task_id, args.seconds))
         else:
             method = "health_check" if args.command == "health" else "shutdown"
             result = asyncio.run(call(settings, method))

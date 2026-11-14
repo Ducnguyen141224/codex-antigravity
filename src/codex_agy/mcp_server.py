@@ -4,7 +4,7 @@ from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
 
-from codex_agy.api import TOOLS
+from codex_agy.api import TOOLS, BackgroundWait
 from codex_agy.config import Settings
 from codex_agy.ipc import call, failure
 from codex_agy.models import Problem
@@ -20,9 +20,20 @@ READ_ONLY = {
 }
 
 
-def make_server(settings: Settings) -> Server:
+def make_server(settings: Settings, wait_only: bool = False) -> Server:
+    operations = (
+        {
+            "wait_for_review": (
+                BackgroundWait,
+                "Wait for an AGY milestone to need review, permission, or recovery. "
+                "Keeps one call open for up to 1800 seconds. Invoke when the user selects Antigravity.",
+            )
+        }
+        if wait_only
+        else TOOLS
+    )
     server = Server(
-        "codex_agy",
+        "agy_wait" if wait_only else "codex_agy",
         version="0.1.0",
         instructions="Delegate implementation to AGY. Review the immutable revision before accepting.",
     )
@@ -34,16 +45,18 @@ def make_server(settings: Settings) -> Server:
                 name=name,
                 description=description,
                 inputSchema=model.model_json_schema(),
-                annotations=ToolAnnotations(readOnlyHint=name in READ_ONLY, openWorldHint=False),
+                annotations=ToolAnnotations(
+                    readOnlyHint=wait_only or name in READ_ONLY, openWorldHint=False
+                ),
             )
-            for name, (model, description) in TOOLS.items()
+            for name, (model, description) in operations.items()
         ]
 
     @server.call_tool(validate_input=False)
     async def invoke(name, arguments):
         result = (
-            await call(settings, name, arguments)
-            if name in TOOLS
+            await call(settings, "wait_background" if wait_only else name, arguments)
+            if name in operations
             else failure(Problem("UNKNOWN_TOOL", "Unknown supervisor operation."))
         )
         return CallToolResult(
@@ -55,7 +68,7 @@ def make_server(settings: Settings) -> Server:
     return server
 
 
-async def run(settings: Settings):
-    server = make_server(settings)
+async def run(settings: Settings, wait_only: bool = False):
+    server = make_server(settings, wait_only)
     async with stdio_server() as (reader, writer):
         await server.run(reader, writer, server.create_initialization_options())

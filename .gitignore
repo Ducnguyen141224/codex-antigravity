@@ -10,3 +10,4 @@ dist/
 config.yaml
 .runtime/
 plugins/antigravity/skills/agy/runtime.json
+plugins/antigravity/.mcp.json

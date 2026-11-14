@@ -1,8 +1,9 @@
 {
   "name": "antigravity",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Delegate an explicitly requested coding task to Antigravity with Codex review.",
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "requires_local_executor": true,
   "interface": {
     "displayName": "Antigravity",

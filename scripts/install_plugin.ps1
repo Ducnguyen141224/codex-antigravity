@@ -13,6 +13,16 @@ $Runtime = [ordered]@{
     start_script = Join-Path $PSScriptRoot 'start_supervisor.ps1'
 } | ConvertTo-Json
 [IO.File]::WriteAllText($RuntimePath, $Runtime)
+$WaitServer = @{
+    mcpServers = @{
+        agy_wait = @{
+            command = $VenvPython
+            args = @('-m', 'codex_agy.cli', '--config', $ConfigPath, 'mcp-wait')
+            tool_timeout_sec = 1860
+        }
+    }
+} | ConvertTo-Json -Depth 6
+[IO.File]::WriteAllText((Join-Path $ProjectRoot 'plugins\antigravity\.mcp.json'), $WaitServer)
 
 Invoke-Checked $Codex.Source @('plugin', 'marketplace', 'add', $ProjectRoot)
 Invoke-Checked $Codex.Source @('plugin', 'add', 'antigravity@agy-local')

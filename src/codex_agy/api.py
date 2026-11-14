@@ -30,6 +30,10 @@ class Wait(TaskRef):
     timeout_seconds: float = Field(40, ge=0, le=50)
 
 
+class BackgroundWait(TaskRef):
+    timeout_seconds: float = Field(1800, ge=0, le=1800)
+
+
 class Review(TaskRef):
     view: Literal["summary", "diff", "fix_diff", "file"] = "summary"
     path: str | None = None
@@ -100,7 +104,7 @@ TOOLS = {
     ),
     "wait_for_completion": (Wait, "Wait for review, a permission request, or a terminal status."),
     "get_task_status": (TaskRef, "Read milestone state and timestamps."),
-    "get_task_result": (TaskRef, "Read execution result, state and diagnostics."),
+    "get_task_result": (TaskRef, "Read milestone status and a compact outcome when available."),
     "get_review_context": (Review, "Read the immutable review summary, paginated diff, or file."),
     "request_fix": (Fix, "Submit revision-bound independent findings and queue an AGY fix."),
     "revise_plan": (PlanInput, "Append a new plan version for future executions."),

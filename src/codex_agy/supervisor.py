@@ -3,7 +3,6 @@ import contextlib
 import hashlib
 import logging
 import os
-import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -15,6 +14,7 @@ from codex_agy.storage import Database, decode, encode, now
 
 log = logging.getLogger(__name__)
 STOPPED = {State.FAILED, State.BLOCKED, State.TIMED_OUT, State.INTERRUPTED, State.CANCELLED}
+WAITING_FOR_AGENT = BUSY - {State.WAITING_PERMISSION, State.WAITING_INPUT}
 
 
 class Supervisor:
@@ -280,16 +280,24 @@ class Supervisor:
     async def get_task_result(self, request):
         task = self.db.task(request.task_id)
         result = self.status(request.task_id)
-        events = self.db.all(
-            "SELECT previous,status,created_at,details FROM task_events WHERE task_id=? ORDER BY id DESC LIMIT 30",
-            (request.task_id,),
-        )
-        result.update(
-            result=decode(task["result"]),
-            events=[
-                {**dict(event), "details": decode(event["details"])} for event in reversed(events)
-            ],
-        )
+        if result["status"] in BUSY:
+            return result
+        agent_result = decode(task["result"], {})
+        if agent_result:
+            result["result"] = {"stop_reason": agent_result["stop_reason"]}
+        if result["review_revision"]:
+            review = self.db.one(
+                "SELECT metadata FROM review_rounds WHERE task_id=? AND round=?",
+                (task["id"], task["round"]),
+            )
+            counts = {}
+            for check in self.verification_for(task["id"], task["round"]):
+                outcome = check["result"]
+                counts[outcome] = counts.get(outcome, 0) + 1
+            result["review"] = {
+                "changed_file_count": len(decode(review["metadata"])["changed_files"]),
+                "verification_counts": counts,
+            }
         return result
 
     async def list_tasks(self, request):
@@ -308,21 +316,25 @@ class Supervisor:
         return {"tasks": [self.status(row["id"]) for row in rows]}
 
     async def wait_for_completion(self, request):
-        limit = min(request.timeout_seconds, self.settings.max_wait_seconds)
+        return await self.wait_for_status(
+            request.task_id, min(request.timeout_seconds, self.settings.max_wait_seconds)
+        )
+
+    async def wait_background(self, request):
+        return await self.wait_for_status(request.task_id, request.timeout_seconds)
+
+    async def wait_for_status(self, task_id, limit):
         try:
             async with asyncio.timeout(limit):
                 while True:
                     event = self.changed
-                    result = self.status(request.task_id)
-                    if result["status"] not in BUSY - {
-                        State.WAITING_PERMISSION,
-                        State.WAITING_INPUT,
-                    }:
+                    result = self.status(task_id)
+                    if result["status"] not in WAITING_FOR_AGENT:
                         return result
                     await event.wait()
         except TimeoutError:
-            result = self.status(request.task_id)
-            if result["status"] in BUSY - {State.WAITING_PERMISSION, State.WAITING_INPUT}:
+            result = self.status(task_id)
+            if result["status"] in WAITING_FOR_AGENT:
                 result.update(task_status=result["status"], status="PENDING")
             return result
 
@@ -424,45 +436,53 @@ class Supervisor:
         task = self.db.task(task_id)
         round_no = task["round"] + 1
         await acp_client.discover(self.settings)
-        idle = time.monotonic()
+        loop = asyncio.get_running_loop()
+        wake = asyncio.Event()
+        idle = loop.time()
+        started = False
         waiting = False
-        question = False
-        permission_expired = False
+        blocker = None
 
         async def activity(_kind):
             nonlocal idle
-            idle = time.monotonic()
+            idle = loop.time()
+            wake.set()
 
         async def ask():
-            nonlocal question
-            question = True
+            nonlocal blocker
+            blocker = Problem(
+                "AGENT_INPUT_REQUIRED", "AGY asked for input. Inspect the task before retrying."
+            )
             if self.db.task(task_id)["status"] == State.RUNNING:
                 self.move(task_id, State.WAITING_INPUT)
+            wake.set()
 
         async def permission(session_id, tool_call, options):
-            nonlocal waiting, permission_expired
-            if (
-                question
-                or permission_expired
-                or self.db.task(task_id)["status"]
-                not in {
-                    State.RUNNING,
-                    State.WAITING_PERMISSION,
-                }
-            ):
+            nonlocal waiting, blocker
+            if blocker or self.db.task(task_id)["status"] not in {
+                State.RUNNING,
+                State.WAITING_PERMISSION,
+            }:
                 return await acp_client.deny()
             waiting = True
+            wake.set()
             try:
                 return await self.request_permission(task_id, session_id, tool_call, options)
             except TimeoutError:
-                permission_expired = True
+                blocker = Problem(
+                    "PERMISSION_TIMEOUT", "Permission decision expired; inspect before retrying."
+                )
                 return await acp_client.deny()
             finally:
                 waiting = any(entry[0] == task_id for entry in self.permissions.values())
                 await activity("permission")
 
         async def on_session(session_id):
-            self.db.write("UPDATE milestones SET session_id=? WHERE id=?", (session_id, task_id))
+            nonlocal started
+            started = True
+            self.db.write(
+                "UPDATE milestones SET session_id=?,result=NULL WHERE id=?", (session_id, task_id)
+            )
             self.db.write("INSERT INTO sessions VALUES(?,?,?,NULL)", (session_id, task_id, now()))
             await activity("session")
             self.move(task_id, State.RUNNING)
@@ -479,43 +499,34 @@ class Supervisor:
                 task["session_id"] if task["round"] and not task["retrying"] else None,
             )
         )
+        turn.add_done_callback(lambda _: wake.set())
         try:
             while not turn.done():
-                await asyncio.wait({turn}, timeout=min(self.settings.idle_seconds, 3))
-                if permission_expired:
-                    raise Problem(
-                        "PERMISSION_TIMEOUT",
-                        "Permission decision expired; inspect before retrying.",
-                    )
-                if question:
-                    raise Problem(
-                        "AGENT_INPUT_REQUIRED",
-                        "AGY asked for input. Inspect the task before retrying.",
-                    )
-                if (
-                    not waiting
-                    and time.monotonic() - idle > self.settings.idle_seconds
-                    and (self.db.task(task_id)["status"] == State.RUNNING)
-                ):
+                if blocker:
+                    raise blocker
+                wake.clear()
+                if not started or waiting:
+                    await wake.wait()
+                    continue
+                remaining = idle + self.settings.idle_seconds - loop.time()
+                if remaining <= 0:
                     raise TimeoutError("AGY produced no events before the idle deadline.")
+                try:
+                    async with asyncio.timeout(remaining):
+                        await wake.wait()
+                except TimeoutError:
+                    continue
             response = await turn
         finally:
             if not turn.done():
                 turn.cancel()
             await asyncio.gather(turn, return_exceptions=True)
-        if permission_expired or question:
-            raise Problem(
-                "AGENT_BLOCKED", "AGY requires an expired permission or additional input."
-            )
+        if blocker:
+            raise blocker
+        stop_reason = response["stop_reason"]
         self.db.write("UPDATE milestones SET result=? WHERE id=?", (encode(response), task_id))
-        for line in response["summary"].splitlines():
-            diagnostic = line.strip().lstrip("⚠️ ").casefold()
-            if diagnostic.startswith(
-                ("individual quota reached.", "quota exhausted.", "rate limit exceeded.")
-            ):
-                raise Problem("AGY_QUOTA", line.strip()[:400])
-        if response["stop_reason"] != "end_turn":
-            raise Problem("INCOMPLETE_TURN", f"AGY stopped with {response['stop_reason']}.")
+        if stop_reason != "end_turn":
+            raise Problem("INCOMPLETE_TURN", f"AGY stopped with {stop_reason}.")
         self.move(task_id, State.VERIFYING)
         await self.build_review(task, plan, cwd, head, round_no)
 
@@ -536,11 +547,17 @@ class Supervisor:
                     (task["id"], task["round"]),
                 )
             ]
+        assignment = (
+            "Fix only the independent findings in this milestone. Preserve existing working changes. "
+            if task["round"]
+            else "Implement only the assigned milestone in this detached worktree. "
+        )
         return (
-            "Implement only the assigned milestone in this detached worktree. Preserve the plan and "
+            assignment + "Preserve the plan and "
             "acceptance criteria. Avoid reading or writing outside this worktree. Do not commit, "
             "switch branches, push, deploy, delete independent tests or run destructive commands. "
-            "Use relevant tests and summarize changes and blockers for the independent Codex review.\n\n"
+            "Run targeted checks as needed during implementation. The supervisor runs the plan's "
+            "verification commands after your turn. Keep your end-of-turn report brief.\n\n"
             + encode(payload)
         )
 
@@ -639,10 +656,11 @@ class Supervisor:
         results = await verification.verify(
             commands, cwd, artifacts, revision, self.settings.verification_seconds
         )
-        if (
+        verification_valid = not (
             await workspace.status(cwd)
             or await workspace.text(cwd, "rev-parse", "HEAD") != revision
-        ):
+        )
+        if not verification_valid:
             warnings.append("Verification or another process modified the worktree after snapshot.")
         if any(item["result"] != "PASSED" for item in results):
             warnings.append("Some configured verification checks did not pass.")
@@ -650,6 +668,7 @@ class Supervisor:
             "changed_files": changed,
             "diff_summary": summary,
             "warnings": warnings,
+            "verification_valid_for_revision": verification_valid,
             "outside_expected_files": outside,
             "diff_truncated": len(diff) > workspace.MAX_ARTIFACT,
             "diff_artifact_hash": hashlib.sha256(diff[: workspace.MAX_ARTIFACT]).hexdigest(),
@@ -696,6 +715,15 @@ class Supervisor:
             )
             self.move(task_id, State.REVIEW_REQUIRED)
 
+    def verification_for(self, task_id, round_no):
+        return [
+            decode(item["body"])
+            for item in self.db.all(
+                "SELECT body FROM verification_results WHERE task_id=? AND round=? ORDER BY ordinal",
+                (task_id, round_no),
+            )
+        ]
+
     async def get_review_context(self, request):
         task = self.db.task(request.task_id)
         row = self.db.one(
@@ -713,14 +741,10 @@ class Supervisor:
             "decision": row["decision"],
         }
         if request.view == "summary":
-            verification_rows = self.db.all(
-                "SELECT body FROM verification_results WHERE task_id=? AND round=? ORDER BY ordinal",
-                (task["id"], row["round"]),
-            )
             return {
                 **result,
                 **decode(row["metadata"]),
-                "verification_results": [decode(item["body"]) for item in verification_rows],
+                "verification_results": self.verification_for(task["id"], row["round"]),
                 "workspace_path": task["worktree"],
                 "review_summary": row["review_summary"],
             }
@@ -771,12 +795,20 @@ class Supervisor:
                 )
             if task["status"] != State.REVIEW_REQUIRED:
                 raise Problem("INVALID_STATE", "This task is not awaiting review.")
-            if decision == "ACCEPT" and any(
-                decode(row["body"])["result"] in {"FAILED", "ERROR"}
-                for row in self.db.all(
-                    "SELECT body FROM verification_results WHERE task_id=? AND round=?",
+            if decision == "ACCEPT":
+                row = self.db.one(
+                    "SELECT metadata FROM review_rounds WHERE task_id=? AND round=?",
                     (task["id"], task["round"]),
                 )
+                metadata = decode(row["metadata"])
+                if metadata.get("verification_valid_for_revision") is False:
+                    raise Problem(
+                        "VERIFICATION_STALE",
+                        "The worktree changed during verification. Obtain a fresh review snapshot.",
+                    )
+            if decision == "ACCEPT" and any(
+                check["result"] in {"FAILED", "ERROR"}
+                for check in self.verification_for(task["id"], task["round"])
             ):
                 raise Problem(
                     "VERIFICATION_FAILED", "Resolve verification failures before acceptance."

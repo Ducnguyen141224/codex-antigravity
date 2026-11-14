@@ -34,13 +34,18 @@ class Fixture(Agent):
         if goal == "timeout":
             await asyncio.sleep(90)
         if goal == "quota":
-            await self.connection.session_update(
-                session_id=session_id,
-                update=AgentMessageChunk(
-                    content=TextContentBlock(text="⚠ Individual quota reached. Resets later.")
-                ),
-            )
+            for chunk in ("⚠ Individual quota ", "reached. Resets later."):
+                await self.connection.session_update(
+                    session_id=session_id,
+                    update=AgentMessageChunk(content=TextContentBlock(text=chunk)),
+                )
             return PromptResponse(stop_reason="end_turn")
+        await self.connection.session_update(
+            session_id=session_id,
+            update=AgentMessageChunk(
+                content=TextContentBlock(text="Fixture transcript must stay local.\n")
+            ),
+        )
         if goal == "permission":
             result = await self.connection.request_permission(
                 session_id=session_id,

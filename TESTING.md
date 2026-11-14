@@ -1,5 +1,7 @@
 # Kết quả kiểm thử trên Windows
 
+Phép đo mới về chờ AGY, token, timeout và ngắt kết nối được ghi trong [WAITING_AUDIT.md](WAITING_AUDIT.md).
+
 Kiểm thử ngày 14/11/2026 theo giờ Việt Nam.
 
 | Phạm vi | Kết quả |
