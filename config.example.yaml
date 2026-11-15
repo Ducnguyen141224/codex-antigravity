@@ -3,6 +3,9 @@ agy_executable: agy
 # Optional ACP model ID from the session model selector.
 # agy_model: gemini-3.8-flash
 sandbox: true
+# worktree: routine scoped operations; manual: ask for every request.
+# allow_all: automatically approve every ACP request that offers allow_once.
+permission_mode: worktree
 workers: 2
 max_review_rounds: 3
 startup_seconds: 35

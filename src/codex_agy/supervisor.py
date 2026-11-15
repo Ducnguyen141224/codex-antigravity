@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
-from codex_agy import acp_client, verification, workspace
+from codex_agy import acp_client, permissions, verification, workspace
 from codex_agy.config import Settings
 from codex_agy.models import ACTIVE, BUSY, Problem, State
 from codex_agy.planning import TaskPlan, graph_order
@@ -442,6 +442,9 @@ class Supervisor:
         started = False
         waiting = False
         blocker = None
+        expected_files = {Path(value) for value in plan.expected_files}
+        for item in plan.tasks_for(task["milestone_id"]):
+            expected_files.update(Path(value) for value in item.expected_files)
 
         async def activity(_kind):
             nonlocal idle
@@ -467,7 +470,9 @@ class Supervisor:
             waiting = True
             wake.set()
             try:
-                return await self.request_permission(task_id, session_id, tool_call, options)
+                return await self.request_permission(
+                    task_id, session_id, tool_call, options, cwd, expected_files
+                )
             except TimeoutError:
                 blocker = Problem(
                     "PERMISSION_TIMEOUT", "Permission decision expired; inspect before retrying."
@@ -556,12 +561,14 @@ class Supervisor:
             assignment + "Preserve the plan and "
             "acceptance criteria. Avoid reading or writing outside this worktree. Do not commit, "
             "switch branches, push, deploy, delete independent tests or run destructive commands. "
-            "Run targeted checks as needed during implementation. The supervisor runs the plan's "
-            "verification commands after your turn. Keep your end-of-turn report brief.\n\n"
-            + encode(payload)
+            "The supervisor runs the plan's verification commands after your turn. Leave those "
+            "commands to the supervisor unless you need one to diagnose a specific implementation "
+            "failure. Keep your end-of-turn report brief.\n\n" + encode(payload)
         )
 
-    async def request_permission(self, task_id, session_id, tool_call, options):
+    async def request_permission(
+        self, task_id, session_id, tool_call, options, cwd, expected_files
+    ):
         permission_id = uuid4().hex
         choices = [
             option.model_dump(mode="json", by_alias=True)
@@ -585,6 +592,30 @@ class Supervisor:
             if preview:
                 details["input_preview"] = encode(preview)[:1600]
         request = {"session_id": session_id, "tool_call": details, "options": choices}
+        mode = self.settings.permission_mode
+        allow = next((item for item in choices if item["kind"] == "allow_once"), None)
+        if allow and (
+            mode == "allow_all"
+            or (
+                mode == "worktree"
+                and self.settings.sandbox
+                and permissions.routine_operation(tool, cwd.resolve(), expected_files)
+            )
+        ):
+            choice = allow["optionId"]
+            timestamp = now()
+            self.db.write(
+                "INSERT INTO permissions VALUES(?,?,?,?,?,?)",
+                (
+                    permission_id,
+                    task_id,
+                    encode({**request, "decision_source": mode}),
+                    choice,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            return {"outcome": {"outcome": "selected", "optionId": choice}}
         future = asyncio.get_running_loop().create_future()
         self.permissions[permission_id] = task_id, future, {item["optionId"] for item in choices}
         with self.db.transaction():
@@ -910,6 +941,8 @@ class Supervisor:
             "pid": os.getpid(),
             "database": self.db.one("PRAGMA user_version")[0],
             "active_workers": len(self.running),
+            "permission_mode": self.settings.permission_mode,
+            "sandbox": self.settings.sandbox,
             "supervisor_version": "0.1.0",
         }
 

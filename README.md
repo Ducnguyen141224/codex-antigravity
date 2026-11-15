@@ -100,7 +100,15 @@ Với `get_review_context`, dùng `view="summary"`, `view="diff"`, `view="fix_di
 
 Verification chạy các lệnh argv trong TaskPlan. Khi thiếu lệnh, Supervisor tìm các cấu hình Python, Node, Maven và Gradle có sẵn trong repo. `FAILED` và `ERROR` chặn nghiệm thu. `SKIPPED` và `NOT_AVAILABLE` xuất hiện trong kết quả, Codex cần kiểm tra tiêu chí liên quan bằng phương pháp độc lập trước khi nghiệm thu. Cài dependency theo cách của project trong worktree khi cần.
 
-AGY có thể yêu cầu quyền một lần. `WAITING_PERMISSION` liệt kê tool, đường dẫn và các lựa chọn. Dùng `respond_permission` cho thao tác trong phạm vi yêu cầu. Khi AGY cần thông tin bổ sung, Supervisor ghi blocker và giữ worktree.
+Supervisor tự xử lý quyền ACP theo `permission_mode` trong `config.yaml`. Quyền tự duyệt được ghi lại trong dữ liệu Supervisor và lời gọi chờ vẫn mở.
+
+| Chế độ | Cách hoạt động |
+| --- | --- |
+| `worktree` (mặc định) | Khi bật sandbox, tự duyệt đọc trong worktree, sửa file nằm trong kế hoạch và một số lệnh kiểm tra Git/thư mục có dạng cố định. |
+| `manual` | Trả `WAITING_PERMISSION` để xem và xử lý từng yêu cầu bằng `respond_permission`. |
+| `allow_all` | Python duyệt mọi yêu cầu ACP có lựa chọn `allow_once`, kể cả lệnh shell. |
+
+Muốn chạy AGY với toàn quyền trên máy local, đặt `permission_mode: allow_all` và `sandbox: false`, sau đó khởi động lại Supervisor. Thiết lập này cho AGY thực thi với quyền của tài khoản hệ điều hành đang chạy Supervisor. Khi AGY cần thông tin bổ sung, Supervisor ghi blocker và giữ worktree.
 
 ## Vận hành và xử lý lỗi
 

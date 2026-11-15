@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -347,6 +348,48 @@ async def test_recovery_and_timeout(settings, server, repo):
     finally:
         await call(settings, "shutdown")
         await restarted
+
+
+def auto_decisions(settings, task_id):
+    with sqlite3.connect(settings.data_dir / "supervisor.sqlite3") as db:
+        return db.execute(
+            "SELECT decision FROM permissions WHERE task_id=? "
+            "AND json_extract(request, '$.decision_source')='allow_all'",
+            (task_id,),
+        ).fetchall()
+
+
+async def test_one_wait_skips_multiple_auto_approved_permissions(settings, server, repo):
+    settings.permission_mode = "allow_all"
+    plan = plan_for(repo)
+    plan["user_goal"] = "permission-burst"
+    task_id = (await submit(settings, plan))["task_id"]
+    result = await invoke(settings, "wait_background", task_id=task_id, timeout_seconds=30)
+    assert result["status"] == "REVIEW_REQUIRED", result
+    assert auto_decisions(settings, task_id) == [("yes",)] * 6
+
+
+@pytest.mark.live
+async def test_real_agy_one_wait_with_auto_permissions(settings, server, repo):
+    if os.environ.get("CODEX_AGY_LIVE") != "1":
+        pytest.skip("Set CODEX_AGY_LIVE=1 to use the signed-in Antigravity CLI.")
+    settings.permission_mode = "allow_all"
+    settings.sandbox = False
+    plan = plan_for(repo)
+    plan["tasks"][0]["implementation_steps"] = [
+        "First run the exact terminal command `git status` using the terminal tool. "
+        "Then use the file editor to create hello0.py with greet() returning 'hello'. "
+        "Leave verification to the supervisor."
+    ]
+    task_id = (await submit(settings, plan))["task_id"]
+    result = await invoke(settings, "wait_background", task_id=task_id, timeout_seconds=120)
+    assert result["status"] == "REVIEW_REQUIRED", result
+    context = await invoke(settings, "get_review_context", task_id=task_id)
+    assert context["changed_files"] == ["hello0.py"]
+    assert context["verification_results"][0]["result"] == "PASSED"
+    approved = auto_decisions(settings, task_id)
+    print(f"Live ACP auto-approved requests: {len(approved)}", flush=True)
+    assert approved, "AGY did not exercise ACP permission handling."
 
 
 @pytest.mark.live

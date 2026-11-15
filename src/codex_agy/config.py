@@ -1,6 +1,7 @@
 import os
 import secrets
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import Field
@@ -19,6 +20,7 @@ class Settings(Input):
     agy_executable: str = "agy"
     agy_model: str | None = None
     sandbox: bool = True
+    permission_mode: Literal["manual", "worktree", "allow_all"] = "worktree"
     workers: int = Field(2, ge=1, le=8)
     max_review_rounds: int = Field(3, ge=1, le=10)
     startup_seconds: int = Field(35, ge=2, le=180)

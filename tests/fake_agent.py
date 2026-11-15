@@ -46,10 +46,12 @@ class Fixture(Agent):
                 content=TextContentBlock(text="Fixture transcript must stay local.\n")
             ),
         )
-        if goal == "permission":
+        for index in range({"permission": 1, "permission-burst": 6}.get(goal, 0)):
             result = await self.connection.request_permission(
                 session_id=session_id,
-                tool_call=ToolCallUpdate(tool_call_id="test-call", title="Write fixture file"),
+                tool_call=ToolCallUpdate(
+                    tool_call_id=f"test-call-{index}", title="Write fixture file"
+                ),
                 options=[
                     PermissionOption(kind="allow_once", name="Allow", option_id="yes"),
                     PermissionOption(kind="reject_once", name="Reject", option_id="no"),
