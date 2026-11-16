@@ -2,6 +2,8 @@
   "plan": {
     "plan_id": "hello-example",
     "plan_version": 1,
+    "verification_gate": true,
+    "preflight_commands": [{"argv": ["python", "-c", "import ast,pathlib"]}],
     "project_path": "D:/projects/example",
     "project_context": "Python project. Inspected HEAD and existing tests.",
     "user_goal": "Add a greeting function.",
@@ -51,6 +53,7 @@
         ],
         "verification_commands": [
           {
+            "auto_fix_on_failure": true,
             "argv": [
               "python",
               "-B",

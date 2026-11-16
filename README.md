@@ -89,6 +89,14 @@ CLI `wait <task_id>` cũng giữ một kết nối HTTP theo sự kiện. Tuy nh
 
 `submit_plan` nhận đối tượng `plan` theo schema. Xem [kế hoạch mẫu](examples/plan.example.json) hoặc chạy `.\.venv\Scripts\python.exe -m codex_agy.cli schema submit_plan`. `execute_plan` lên lịch toàn bộ kế hoạch và chờ review giữa các milestone. `execute_milestone` chạy từng milestone qua cùng `execution_id`. `revise_plan` tạo phiên bản mới cho các execution sau.
 
+Mỗi milestone nên tương ứng một phase hoặc một bước chức năng hoàn chỉnh. Ví dụ, gom giao diện cấu hình CSKH, API lưu định tuyến và hành vi trả lời khách thành các task trong cùng một milestone CSKH, có dependency phù hợp. AGY thực hiện hết nhóm task rồi Supervisor chạy kiểm thử nghiệm thu và Codex review một lượt. Codex gom lỗi ảnh hưởng tiêu chí thành một yêu cầu sửa, chờ AGY sửa cả nhóm rồi kiểm tra phần sửa. Với plan có sẵn, dùng các phase người dùng đã định nghĩa làm mốc review. Plan đã chạy giữ nguyên phiên bản và ranh giới milestone.
+
+Để Codex chỉ bắt đầu review sau khi kiểm thử bắt buộc đã đạt, đặt `verification_gate: true` trong plan mới. Mỗi milestone cần ít nhất một lệnh kiểm thử khai báo rõ. Có thể đánh dấu `auto_fix_on_failure: true` trên lệnh kiểm thử chức năng để Supervisor gom các lỗi và giao AGY sửa một lần trong lúc Codex vẫn chờ. Sau bản sửa, Supervisor kiểm tra lại các lệnh bắt buộc trên revision mới. Hãy kiểm tra môi trường và fixture trước khi giao việc, và để `auto_fix_on_failure` tắt trên các lệnh kiểm tra môi trường. Nếu gặp lỗi môi trường, kiểm thử vẫn thất bại sau lần sửa, hoặc hết giới hạn vòng sửa, Supervisor trả `VERIFICATION_BLOCKED` và giữ worktree. Plan cũ mặc định giữ quy trình review như trước.
+
+Khi đến lượt review, Codex gom các lỗi ảnh hưởng đến tiêu chí vào một yêu cầu sửa. Ở vòng sau, ưu tiên `fix_diff`, kết quả test của revision mới và các hành vi có nguy cơ hồi quy. Khi hết giới hạn review, báo các lỗi còn lại.
+
+Khai báo `preflight_commands` ở cấp plan hoặc task để kiểm tra môi trường và fixture trước mỗi lượt AGY. Supervisor lưu kết quả trong thư mục artifacts. Nếu một lệnh thất bại, task báo `PREFLIGHT_FAILED` trước khi mở phiên AGY. Các lệnh này nên kiểm tra cấu hình, kết nối và dữ liệu kiểm thử sẵn có, tránh sửa file được Git theo dõi. Ví dụ `"preflight_commands": [{"argv": ["python", "-c", "import sqlite3"]}]`. Các trường mới là tùy chọn để plan cũ tiếp tục hoạt động. Tự sửa kiểm thử được giới hạn một lần cho mỗi milestone, đồng thời tuân theo giới hạn review hiện có.
+
 | Công việc | Thao tác |
 | --- | --- |
 | Lập và chạy kế hoạch | `submit_plan`, `revise_plan`, `execute_plan`, `execute_milestone` |

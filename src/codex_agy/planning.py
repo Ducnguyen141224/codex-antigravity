@@ -30,6 +30,7 @@ class VerificationCommand(Input):
     argv: Annotated[list[Text], Field(min_length=1, max_length=50)]
     cwd: str = "."
     timeout_seconds: int | None = Field(None, ge=1, le=1800)
+    auto_fix_on_failure: bool = False
 
     @field_validator("cwd")
     @classmethod
@@ -57,6 +58,7 @@ class Task(Input):
     verification_commands: list[VerificationCommand] = Field(max_length=30)
     estimated_complexity: Risk
     risk_level: Risk
+    preflight_commands: list[VerificationCommand] = Field(default_factory=list, max_length=10)
 
     @field_validator("expected_files")
     @classmethod
@@ -97,6 +99,8 @@ class TaskPlan(Input):
     verification_commands: list[VerificationCommand] = Field(max_length=30)
     risk_assessment: Text
     definition_of_done: Steps
+    verification_gate: bool = False
+    preflight_commands: list[VerificationCommand] = Field(default_factory=list, max_length=10)
 
     @field_validator("expected_files")
     @classmethod
@@ -118,6 +122,12 @@ class TaskPlan(Input):
         graph_order({task.task_id: set(task.dependencies) for task in self.tasks}, "task")
         if set(self.dependencies) - task_ids:
             raise ValueError("Plan dependency IDs must name tasks in the plan.")
+        if self.verification_gate and not self.verification_commands:
+            covered = {task.milestone_id for task in self.tasks if task.verification_commands}
+            if milestone_ids - covered:
+                raise ValueError(
+                    "Every gated milestone must have an explicit verification command."
+                )
         graph_order(self.milestone_dependencies(), "milestone")
         return self
 

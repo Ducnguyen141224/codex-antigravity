@@ -112,6 +112,7 @@ TRANSITIONS = {
     },
     State.VERIFYING: {
         State.REVIEW_REQUIRED,
+        State.FIX_REQUESTED,
         State.FAILED,
         State.BLOCKED,
         State.TIMED_OUT,

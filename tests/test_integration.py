@@ -359,6 +359,37 @@ def auto_decisions(settings, task_id):
         ).fetchall()
 
 
+@pytest.mark.parametrize(
+    ("goal", "repairable", "expected", "rounds"),
+    [
+        ("verification-needs-fix", True, "REVIEW_REQUIRED", 2),
+        ("verification-needs-fix", False, "BLOCKED", 1),
+        ("verification-always-fails", True, "BLOCKED", 2),
+    ],
+)
+async def test_verification_gate(settings, server, repo, goal, repairable, expected, rounds):
+    plan = plan_for(repo)
+    plan.update(verification_gate=True, user_goal=goal)
+    check = plan["tasks"][0]["verification_commands"][0]
+    check["auto_fix_on_failure"] = repairable
+    greeting = "hello again" if goal == "verification-needs-fix" else "never returned"
+    check["argv"][-1] = f"from hello0 import greet; assert greet() == {greeting!r}"
+    task_id = (await submit(settings, plan))["task_id"]
+    result = await invoke(settings, "wait_background", task_id=task_id, timeout_seconds=35)
+    assert (result["status"], result["review_round"]) == (expected, rounds), result
+    with sqlite3.connect(settings.data_dir / "supervisor.sqlite3") as db:
+        states = db.execute(
+            "SELECT status FROM task_events WHERE task_id=? ORDER BY id", (task_id,)
+        ).fetchall()
+    assert states.count(("FIX_REQUESTED",)) == rounds - 1
+    assert states.count(("REVIEW_REQUIRED",)) == int(expected == "REVIEW_REQUIRED")
+    if expected == "BLOCKED":
+        assert result["error"]["code"] == "VERIFICATION_BLOCKED"
+    else:
+        diff = await invoke(settings, "get_review_context", task_id=task_id, view="diff")
+        assert "hello again" in diff["content"]
+
+
 async def test_one_wait_skips_multiple_auto_approved_permissions(settings, server, repo):
     settings.permission_mode = "allow_all"
     plan = plan_for(repo)
@@ -369,6 +400,52 @@ async def test_one_wait_skips_multiple_auto_approved_permissions(settings, serve
     assert auto_decisions(settings, task_id) == [("yes",)] * 6
 
 
+async def test_preflight_blocks_before_agent_session(settings, server, repo):
+    plan = plan_for(repo)
+    plan["preflight_commands"] = [{"argv": ["python", "-c", "raise SystemExit(1)"]}]
+    task_id = (await submit(settings, plan))["task_id"]
+    result = await invoke(settings, "wait_background", task_id=task_id, timeout_seconds=20)
+    assert result["status"] == "BLOCKED"
+    assert result["error"]["code"] == "PREFLIGHT_FAILED"
+    assert result["session_id"] is None
+
+
+@pytest.mark.live
+async def test_real_agy_auto_repair_in_one_wait(settings, server, repo, tmp_path):
+    if os.environ.get("CODEX_AGY_LIVE") != "1":
+        pytest.skip("Set CODEX_AGY_LIVE=1 to use the signed-in Antigravity CLI.")
+    settings.permission_mode = "allow_all"
+    settings.sandbox = False
+    plan = plan_for(repo)
+    plan["verification_gate"] = True
+    plan["preflight_commands"] = [{"argv": ["python", "-c", "import ast,pathlib"]}]
+    marker = tmp_path / "verification-first-pass"
+    script = (
+        f"from pathlib import Path; p=Path({str(marker)!r}); first=not p.exists(); "
+        "p.touch(); assert not first, 'Verification requests a repair pass. "
+        "Ensure hello0.greet returns hello and add a docstring if missing.'; "
+        "from hello0 import greet; assert greet() == 'hello'"
+    )
+    plan["tasks"][0]["verification_commands"] = [
+        {"argv": ["python", "-B", "-c", script], "auto_fix_on_failure": True}
+    ]
+    task_id = (await submit(settings, plan))["task_id"]
+    result = await invoke(settings, "wait_background", task_id=task_id, timeout_seconds=180)
+    assert result["status"] == "REVIEW_REQUIRED", result
+    assert result["review_round"] == 2, result
+    context = await invoke(settings, "get_review_context", task_id=task_id)
+    assert context["verification_results"][0]["result"] == "PASSED"
+    with sqlite3.connect(settings.data_dir / "supervisor.sqlite3") as db:
+        assert (
+            db.execute(
+                "SELECT count(*) FROM review_rounds WHERE task_id=? AND decision='AUTO_FIX'",
+                (task_id,),
+            ).fetchone()[0]
+            == 1
+        )
+    print("LIVE one wait, preflight passed, one repair, verified revision ready", flush=True)
+
+
 @pytest.mark.live
 async def test_real_agy_one_wait_with_auto_permissions(settings, server, repo):
     if os.environ.get("CODEX_AGY_LIVE") != "1":
@@ -376,6 +453,7 @@ async def test_real_agy_one_wait_with_auto_permissions(settings, server, repo):
     settings.permission_mode = "allow_all"
     settings.sandbox = False
     plan = plan_for(repo)
+    plan["verification_gate"] = True
     plan["tasks"][0]["implementation_steps"] = [
         "First run the exact terminal command `git status` using the terminal tool. "
         "Then use the file editor to create hello0.py with greet() returning 'hello'. "

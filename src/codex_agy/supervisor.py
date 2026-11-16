@@ -76,7 +76,18 @@ class Supervisor:
         return await self.store_plan("revise_plan", request)
 
     async def store_plan(self, operation, request):
-        digest = self.fingerprint(request)
+        # Keep idempotency keys issued before the verification options were added valid.
+        original = request.model_dump(mode="json")
+        submitted = original["plan"]
+        if not submitted["verification_gate"]:
+            del submitted["verification_gate"]
+        for owner in [submitted, *submitted["tasks"]]:
+            if not owner["preflight_commands"]:
+                del owner["preflight_commands"]
+            for command in owner["verification_commands"]:
+                if not command["auto_fix_on_failure"]:
+                    del command["auto_fix_on_failure"]
+        digest = hashlib.sha256(encode(original).encode()).hexdigest()
         plan = request.plan
         project, key = await workspace.repository(plan.project_path, self.settings.allowed_roots)
         plan = plan.model_copy(update={"project_path": project})
@@ -96,7 +107,7 @@ class Supervisor:
                     "SELECT body FROM plan_versions WHERE plan_id=? AND version=?",
                     (plan.plan_id, plan.plan_version),
                 )
-                if existing and existing["body"] == body:
+                if existing and TaskPlan.model_validate_json(existing["body"]) == plan:
                     self.db.cache(operation, request.idempotency_key, digest, response)
                     return response
                 if operation == "submit_plan":
@@ -435,6 +446,22 @@ class Supervisor:
         )
         task = self.db.task(task_id)
         round_no = task["round"] + 1
+        preflight = [*plan.preflight_commands]
+        for item in plan.tasks_for(task["milestone_id"]):
+            preflight.extend(item.preflight_commands)
+        if preflight:
+            logs = self.settings.data_dir / "artifacts" / task_id / f"preflight-{uuid4().hex}"
+            checks = await verification.verify(
+                preflight, cwd, logs, head, self.settings.verification_seconds
+            )
+            (logs / "results.json").write_text(encode(checks), encoding="utf-8")
+            failures = [item for item in checks if item["result"] != "PASSED"]
+            if failures:
+                raise Problem(
+                    "PREFLIGHT_FAILED",
+                    "Environment or fixture checks failed before starting AGY.",
+                    {"failed_count": len(failures), "results_path": str(logs / "results.json")},
+                )
         await acp_client.discover(self.settings)
         loop = asyncio.get_running_loop()
         wake = asyncio.Event()
@@ -557,8 +584,20 @@ class Supervisor:
             if task["round"]
             else "Implement only the assigned milestone in this detached worktree. "
         )
+        if task["round"] and self.db.one(
+            "SELECT 1 FROM review_rounds WHERE task_id=? AND round=? AND decision='AUTO_FIX'",
+            (task["id"], task["round"]),
+        ):
+            assignment = (
+                "Fix the implementation behind the failed verification commands in the findings. "
+                "Run those commands if needed to diagnose the failure. Do not weaken or bypass "
+                "the checks or change their expected behavior. "
+            )
         return (
-            assignment + "Preserve the plan and "
+            assignment + "Complete all assigned tasks in dependency order as one functional phase "
+            "before ending your turn. End early only if a blocker prevents further progress. "
+            "Acceptance verification and independent review happen after this whole milestone. "
+            "Preserve the plan and "
             "acceptance criteria. Avoid reading or writing outside this worktree. Do not commit, "
             "switch branches, push, deploy, delete independent tests or run destructive commands. "
             "The supervisor runs the plan's verification commands after your turn. Leave those "
@@ -675,13 +714,19 @@ class Supervisor:
         ]
         if not commands:
             commands = verification.discover_commands(cwd)
+        previous_review = self.db.one(
+            "SELECT revision FROM review_rounds WHERE task_id=? AND decision='FIX' "
+            "ORDER BY round DESC LIMIT 1",
+            (task_id,),
+        )
+        previous_revision = previous_review["revision"] if previous_review else None
         artifacts = self.settings.data_dir / "artifacts" / task_id / str(round_no)
         artifacts.mkdir(parents=True, exist_ok=True)
         diff_path = artifacts / "review.diff"
         diff_path.write_bytes(diff[: workspace.MAX_ARTIFACT])
         delta_path = None
-        if task["round"]:
-            _, _, delta, _ = await workspace.changes(cwd, head, revision)
+        if previous_revision:
+            _, _, delta, _ = await workspace.changes(cwd, previous_revision, revision)
             delta_path = artifacts / "fix.diff"
             delta_path.write_bytes(delta[: workspace.MAX_ARTIFACT])
         results = await verification.verify(
@@ -712,7 +757,10 @@ class Supervisor:
                 *(c for item in tasks for c in item.acceptance_criteria),
             ],
             "definition_of_done": plan.definition_of_done,
-            "previous_revision": head if task["round"] else None,
+            "plan_id": plan.plan_id,
+            "plan_version": plan.plan_version,
+            "milestone_id": task["milestone_id"],
+            "previous_revision": previous_revision,
         }
         with self.db.transaction():
             self.db.write(
@@ -744,7 +792,78 @@ class Supervisor:
                 "UPDATE milestones SET round=?,review_revision=?,retrying=0 WHERE id=?",
                 (round_no, revision, task_id),
             )
+            if plan.verification_gate:
+                self.finish_gated_verification(
+                    task_id, round_no, commands, results, verification_valid
+                )
+            else:
+                self.move(task_id, State.REVIEW_REQUIRED)
+
+    def finish_gated_verification(self, task_id, round_no, commands, results, valid):
+        failures = [item for item in results if item["result"] != "PASSED"]
+        if valid and not failures:
             self.move(task_id, State.REVIEW_REQUIRED)
+            return
+
+        failed_checks = [
+            {
+                "check_number": number,
+                "command_preview": " ".join(item.get("command", []))[:240],
+                "cwd": item.get("cwd", "."),
+                "result": item["result"],
+                "exit_code": item.get("exit_code"),
+            }
+            for number, item in enumerate(results, 1)
+            if item["result"] != "PASSED"
+        ]
+        already_retried = self.db.one(
+            "SELECT 1 FROM review_rounds WHERE task_id=? AND decision='AUTO_FIX' LIMIT 1",
+            (task_id,),
+        )
+        manual_commands = {(tuple(c.argv), c.cwd) for c in commands if not c.auto_fix_on_failure}
+        repairable = bool(failures) and all(
+            item["result"] == "FAILED"
+            and (tuple(item["command"]), item["cwd"]) not in manual_commands
+            for item in failures
+        )
+        if (
+            valid
+            and repairable
+            and not already_retried
+            and round_no < self.settings.max_review_rounds
+        ):
+            self.db.write(
+                "UPDATE review_rounds SET decision='AUTO_FIX',review_summary=? WHERE task_id=? AND round=?",
+                ("Supervisor requested one repair for failed required checks.", task_id, round_no),
+            )
+            for ordinal, check in enumerate(failed_checks):
+                original = results[check["check_number"] - 1]
+                check["command"] = original["command"]
+                log_path = original.get("log_path")
+                if log_path:
+                    check["diagnostic_tail"] = (
+                        Path(log_path).read_bytes()[-2000:].decode("utf-8", "replace")
+                    )
+                self.db.write(
+                    "INSERT INTO review_findings VALUES(?,?,?,?)",
+                    (task_id, round_no, ordinal, encode(check)),
+                )
+            self.move(task_id, State.FIX_REQUESTED)
+            return
+
+        self.move(
+            task_id,
+            State.BLOCKED,
+            {
+                "code": "VERIFICATION_BLOCKED",
+                "message": "Required checks did not pass or the snapshot changed. Workspace retained.",
+                "details": {
+                    "snapshot_valid": valid,
+                    "failed_check_count": len(failed_checks),
+                    "checks": failed_checks[:10],
+                },
+            },
+        )
 
     def verification_for(self, task_id, round_no):
         return [

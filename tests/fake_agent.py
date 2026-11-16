@@ -61,6 +61,8 @@ class Fixture(Agent):
                 return PromptResponse(stop_reason="refusal")
         name = data["assigned_tasks"][0]["expected_files"][0]
         value = "hello again" if data.get("independent_findings") else "hello"
+        if goal == "verification-needs-fix" and not data.get("independent_findings"):
+            value = "not ready"
         (self.cwd / name).write_text(f"def greet():\n    return {value!r}\n", encoding="utf-8")
         return PromptResponse(stop_reason="end_turn")
 
