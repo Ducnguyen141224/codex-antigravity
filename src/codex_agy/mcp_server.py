@@ -10,6 +10,7 @@ from codex_agy.ipc import call, failure
 from codex_agy.models import Problem
 
 READ_ONLY = {
+    "get_execution_metrics",
     "wait_for_completion",
     "get_task_status",
     "get_task_result",
@@ -54,6 +55,10 @@ def make_server(settings: Settings, wait_only: bool = False) -> Server:
 
     @server.call_tool(validate_input=False)
     async def invoke(name, arguments):
+        if name in operations and arguments.get("task_id"):
+            await call(
+                settings, "record_mcp_call", {"task_id": arguments["task_id"], "method": name}
+            )
         result = (
             await call(settings, "wait_background" if wait_only else name, arguments)
             if name in operations

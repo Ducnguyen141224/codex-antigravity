@@ -27,3 +27,26 @@ def test_cross_milestone_cycle(tmp_path):
     data["milestones"][0]["dependencies"] = ["m1"]
     with pytest.raises(ValidationError, match="Circular milestone"):
         TaskPlan.model_validate(data)
+
+
+def test_hybrid_checkpoint_validation(tmp_path):
+    data = plan_for(tmp_path, 2)
+    data.update(review_strategy="hybrid", work_size="medium", verification_gate=True)
+    data["tasks"][1]["critical_change"] = "authentication"
+    assert len(TaskPlan.model_validate(data).milestones) == 2
+    data["tasks"][0]["critical_change"] = "database"
+    with pytest.raises(ValidationError, match="preceding review"):
+        TaskPlan.model_validate(data)
+
+
+def test_hybrid_small_and_medium_checkpoint_counts(tmp_path):
+    data = plan_for(tmp_path)
+    data.update(review_strategy="hybrid", verification_gate=True)
+    assert TaskPlan.model_validate(data).work_size == "small"
+    data["work_size"] = "medium"
+    with pytest.raises(ValidationError, match="checkpoint_exception_reason"):
+        TaskPlan.model_validate(data)
+    data["checkpoint_exception_reason"] = (
+        "Existing implementation makes a final-only check sufficient."
+    )
+    assert len(TaskPlan.model_validate(data).milestones) == 1

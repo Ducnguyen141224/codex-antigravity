@@ -410,6 +410,41 @@ async def test_preflight_blocks_before_agent_session(settings, server, repo):
     assert result["session_id"] is None
 
 
+async def test_hybrid_mcp_metrics_and_checkpoint_pause(settings, server, repo, tmp_path):
+    import yaml
+
+    plan = plan_for(repo, 2)
+    plan.update(review_strategy="hybrid", work_size="medium", verification_gate=True)
+    plan["tasks"][1]["critical_change"] = "integration"
+    first = await submit(settings, plan)
+    config = tmp_path / "metric-config.yaml"
+    config.write_text(yaml.safe_dump(settings.model_dump(mode="json")), encoding="utf-8")
+    params = StdioServerParameters(
+        command=sys.executable, args=["-m", "codex_agy.cli", "--config", str(config), "mcp-wait"]
+    )
+    async with stdio_client(params) as (reader, writer), McpSession(reader, writer) as session:
+        await session.initialize()
+        result = await session.call_tool(
+            "wait_for_review", {"task_id": first["task_id"], "timeout_seconds": 30}
+        )
+        assert result.structuredContent["data"]["status"] == "REVIEW_REQUIRED"
+    rows = (await invoke(settings, "list_tasks", execution_id=first["execution_id"]))["tasks"]
+    assert {t["status"] for t in rows} == {"REVIEW_REQUIRED", "VALIDATED"}
+    metrics = await invoke(settings, "get_execution_metrics", execution_id=first["execution_id"])
+    assert metrics["review_entries"] == 1
+    assert metrics["codex_token_usage"] is None
+    assert {"source": "mcp", "method": "wait_for_review", "count": 1} in metrics["tool_calls"]
+    settings.max_review_rounds = 9
+    with sqlite3.connect(settings.data_dir / "supervisor.sqlite3") as db:
+        assert (
+            db.execute(
+                "SELECT max_review_rounds FROM execution_policies WHERE execution_id=?",
+                (first["execution_id"],),
+            ).fetchone()[0]
+            == 3
+        )
+
+
 @pytest.mark.live
 async def test_real_agy_auto_repair_in_one_wait(settings, server, repo, tmp_path):
     if os.environ.get("CODEX_AGY_LIVE") != "1":
@@ -417,7 +452,7 @@ async def test_real_agy_auto_repair_in_one_wait(settings, server, repo, tmp_path
     settings.permission_mode = "allow_all"
     settings.sandbox = False
     plan = plan_for(repo)
-    plan["verification_gate"] = True
+    plan.update(review_strategy="hybrid", verification_gate=True)
     plan["preflight_commands"] = [{"argv": ["python", "-c", "import ast,pathlib"]}]
     marker = tmp_path / "verification-first-pass"
     script = (
@@ -444,6 +479,61 @@ async def test_real_agy_auto_repair_in_one_wait(settings, server, repo, tmp_path
             == 1
         )
     print("LIVE one wait, preflight passed, one repair, verified revision ready", flush=True)
+
+
+@pytest.mark.live
+async def test_real_hybrid_two_checkpoints(settings, server, repo, tmp_path):
+    if os.environ.get("CODEX_AGY_LIVE") != "1":
+        pytest.skip("Set CODEX_AGY_LIVE=1 to use the signed-in Antigravity CLI.")
+    import yaml
+
+    settings.permission_mode = "allow_all"
+    settings.sandbox = False
+    plan = plan_for(repo, 2)
+    plan.update(review_strategy="hybrid", work_size="medium", verification_gate=True)
+    plan["tasks"][1]["critical_change"] = "integration"
+    first = await submit(settings, plan)
+    config = tmp_path / "hybrid-live.yaml"
+    config.write_text(yaml.safe_dump(settings.model_dump(mode="json")), encoding="utf-8")
+    params = StdioServerParameters(
+        command=sys.executable, args=["-m", "codex_agy.cli", "--config", str(config), "mcp-wait"]
+    )
+    task_id = first["task_id"]
+    async with stdio_client(params) as (reader, writer), McpSession(reader, writer) as session:
+        await session.initialize()
+        for index in range(2):
+            result = await session.call_tool(
+                "wait_for_review", {"task_id": task_id, "timeout_seconds": 180}
+            )
+            status = result.structuredContent["data"]
+            assert status["status"] == "REVIEW_REQUIRED", status
+            if index == 0:
+                assert not (Path(status["workspace_path"]) / "hello1.py").exists()
+            diff = await invoke(settings, "get_review_context", task_id=task_id, view="diff")
+            assert f"hello{index}.py" in diff["content"]
+            code, _, err = await capture(
+                [
+                    sys.executable,
+                    "-B",
+                    "-c",
+                    f"from hello{index} import greet; assert greet() == 'hello'",
+                ],
+                Path(status["workspace_path"]),
+            )
+            assert code == 0, err
+            decision = await invoke(
+                settings,
+                "accept_milestone",
+                task_id=task_id,
+                review_revision=status["review_revision"],
+                review_summary="Inspected diff and independently verified checkpoint behavior.",
+            )
+            task_id = decision.get("next_task_id", task_id)
+    metrics = await invoke(settings, "get_execution_metrics", execution_id=first["execution_id"])
+    assert metrics["review_entries"] == 2, metrics
+    assert sum(c["count"] for c in metrics["tool_calls"] if c["source"] == "mcp") == 2
+    assert metrics["codex_token_usage"] is None
+    print("LIVE Hybrid: 2 review checkpoints, 2 MCP waits, token usage unavailable", flush=True)
 
 
 @pytest.mark.live

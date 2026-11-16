@@ -3,7 +3,15 @@
     "plan_id": "hello-example",
     "plan_version": 1,
     "verification_gate": true,
-    "preflight_commands": [{"argv": ["python", "-c", "import ast,pathlib"]}],
+    "preflight_commands": [
+      {
+        "argv": [
+          "python",
+          "-c",
+          "import ast,pathlib"
+        ]
+      }
+    ],
     "project_path": "D:/projects/example",
     "project_context": "Python project. Inspected HEAD and existing tests.",
     "user_goal": "Add a greeting function.",
@@ -80,7 +88,9 @@
     "risk_assessment": "One small module",
     "definition_of_done": [
       "Codex independently reviews and accepts"
-    ]
+    ],
+    "review_strategy": "hybrid",
+    "work_size": "small"
   },
   "idempotency_key": "hello-example-v1"
 }

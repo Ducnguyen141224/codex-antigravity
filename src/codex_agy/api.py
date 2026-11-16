@@ -26,6 +26,14 @@ class TaskRef(Input):
     task_id: Id
 
 
+class ExecutionRef(Input):
+    execution_id: Id
+
+
+class McpCall(TaskRef):
+    method: Id
+
+
 class Wait(TaskRef):
     timeout_seconds: float = Field(40, ge=0, le=50)
 
@@ -93,6 +101,11 @@ class Capabilities(Input):
 
 
 TOOLS = {
+    "get_execution_metrics": (
+        ExecutionRef,
+        "Read persisted review, IPC and MCP counts. Token usage is unavailable unless measured by the Codex host.",
+    ),
+    "record_mcp_call": (McpCall, "Record a task-bound MCP invocation for local measurement."),
     "submit_plan": (PlanInput, "Validate and store an inspected project plan."),
     "execute_plan": (
         ExecutePlan,

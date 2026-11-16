@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 from conftest import plan_for
@@ -6,6 +7,23 @@ from codex_agy.api import ExecutePlan, PlanInput
 from codex_agy.models import State
 from codex_agy.storage import Database
 from codex_agy.supervisor import Supervisor
+
+
+def test_existing_database_gets_metrics_tables(tmp_path):
+    path = tmp_path / "old.sqlite3"
+    db = Database(path)
+    db.write("INSERT INTO idempotency VALUES('sample','key','fingerprint','{}')")
+    db.close()
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE execution_policies")
+        conn.execute("DROP TABLE tool_calls")
+    db = Database(path)
+    try:
+        assert db.one("SELECT count(*) FROM tool_calls")[0] == 0
+        assert db.one("SELECT count(*) FROM execution_policies")[0] == 0
+        assert db.one("SELECT response FROM idempotency WHERE key='key'")[0] == "{}"
+    finally:
+        db.close()
 
 
 async def test_restart_recovers_rows_left_active_without_shutdown(settings, repo):

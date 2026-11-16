@@ -7,6 +7,13 @@ from pathlib import Path
 from codex_agy.models import ACTIVE, Problem, State
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS execution_policies (
+    execution_id TEXT PRIMARY KEY, max_review_rounds INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tool_calls (
+    id INTEGER PRIMARY KEY, execution_id TEXT NOT NULL, method TEXT NOT NULL,
+    source TEXT NOT NULL, created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS plans (
     id TEXT PRIMARY KEY, project TEXT NOT NULL, repo_key TEXT NOT NULL, created_at TEXT NOT NULL
 );
@@ -153,7 +160,8 @@ class Database:
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA journal_mode = WAL")
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
-        if version == 0:
+        if version in {0, 1}:
+            # Additive tables also need to be installed for databases from older releases.
             self.conn.executescript(f"BEGIN IMMEDIATE;\n{SCHEMA}\nCOMMIT;")
         elif version != 1:
             self.close()

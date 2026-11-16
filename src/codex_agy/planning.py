@@ -59,6 +59,9 @@ class Task(Input):
     estimated_complexity: Risk
     risk_level: Risk
     preflight_commands: list[VerificationCommand] = Field(default_factory=list, max_length=10)
+    critical_change: (
+        Literal["architecture", "database", "authentication", "payment", "integration"] | None
+    ) = None
 
     @field_validator("expected_files")
     @classmethod
@@ -101,6 +104,9 @@ class TaskPlan(Input):
     definition_of_done: Steps
     verification_gate: bool = False
     preflight_commands: list[VerificationCommand] = Field(default_factory=list, max_length=10)
+    review_strategy: Literal["legacy", "hybrid"] = "legacy"
+    work_size: Literal["small", "medium", "large"] = "small"
+    checkpoint_exception_reason: str | None = Field(None, min_length=1, max_length=2000)
 
     @field_validator("expected_files")
     @classmethod
@@ -129,6 +135,22 @@ class TaskPlan(Input):
                     "Every gated milestone must have an explicit verification command."
                 )
         graph_order(self.milestone_dependencies(), "milestone")
+        if self.review_strategy == "hybrid":
+            if not self.verification_gate:
+                raise ValueError("Hybrid plans require verification_gate=true.")
+            target = {"small": 1, "medium": 2}.get(self.work_size)
+            if target and len(self.milestones) != target and not self.checkpoint_exception_reason:
+                raise ValueError(
+                    "Explain checkpoint count deviations in checkpoint_exception_reason."
+                )
+            dependencies = self.milestone_dependencies()
+            for task in self.tasks:
+                if (task.critical_change or task.risk_level == "high") and not dependencies[
+                    task.milestone_id
+                ]:
+                    raise ValueError(
+                        "Critical or high-risk steps need a preceding review milestone."
+                    )
         return self
 
     def milestone_dependencies(self) -> dict[str, set[str]]:

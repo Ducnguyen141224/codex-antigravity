@@ -89,7 +89,16 @@ CLI `wait <task_id>` cũng giữ một kết nối HTTP theo sự kiện. Tuy nh
 
 `submit_plan` nhận đối tượng `plan` theo schema. Xem [kế hoạch mẫu](examples/plan.example.json) hoặc chạy `.\.venv\Scripts\python.exe -m codex_agy.cli schema submit_plan`. `execute_plan` lên lịch toàn bộ kế hoạch và chờ review giữa các milestone. `execute_milestone` chạy từng milestone qua cùng `execution_id`. `revise_plan` tạo phiên bản mới cho các execution sau.
 
-Mỗi milestone nên tương ứng một phase hoặc một bước chức năng hoàn chỉnh. Ví dụ, gom giao diện cấu hình CSKH, API lưu định tuyến và hành vi trả lời khách thành các task trong cùng một milestone CSKH, có dependency phù hợp. AGY thực hiện hết nhóm task rồi Supervisor chạy kiểm thử nghiệm thu và Codex review một lượt. Codex gom lỗi ảnh hưởng tiêu chí thành một yêu cầu sửa, chờ AGY sửa cả nhóm rồi kiểm tra phần sửa. Với plan có sẵn, dùng các phase người dùng đã định nghĩa làm mốc review. Plan đã chạy giữ nguyên phiên bản và ranh giới milestone.
+Dùng Hybrid: AGY làm theo phase lớn, Codex review tại checkpoint quan trọng. Mỗi milestone trong TaskPlan là một checkpoint và có thể chứa nhiều phase dưới dạng các task có dependency. Codex ghi rõ lý do và tiêu chí của từng checkpoint khi lập plan, dựa trên phạm vi, dependency, rủi ro và giới hạn thực thi.
+
+| Quy mô | Cách đặt checkpoint |
+| --- | --- |
+| Nhỏ, như sửa UI hoặc CRUD đơn giản | AGY làm toàn bộ rồi Codex review một lượt. |
+| Trung bình, thêm chức năng hoàn chỉnh | Ưu tiên một checkpoint giữa quá trình và một review cuối. |
+| Lớn, xây module hoặc hệ thống | Review tại các ranh giới kiến trúc và tích hợp. |
+| Rủi ro cao, như authentication, payment, migration | Review trước khi giao AGY bước quan trọng tiếp theo. |
+
+Số checkpoint được quyết định cho từng công việc. Với plan có sẵn, giữ nội dung và thứ tự phase, gom các phase liên quan thành checkpoint phù hợp và tôn trọng checkpoint người dùng yêu cầu rõ. AGY hoàn thành toàn bộ task của checkpoint rồi Supervisor chạy kiểm thử nghiệm thu và Codex review. Codex gom lỗi ảnh hưởng tiêu chí thành một yêu cầu sửa. Plan đã chạy giữ nguyên phiên bản và ranh giới milestone.
 
 Để Codex chỉ bắt đầu review sau khi kiểm thử bắt buộc đã đạt, đặt `verification_gate: true` trong plan mới. Mỗi milestone cần ít nhất một lệnh kiểm thử khai báo rõ. Có thể đánh dấu `auto_fix_on_failure: true` trên lệnh kiểm thử chức năng để Supervisor gom các lỗi và giao AGY sửa một lần trong lúc Codex vẫn chờ. Sau bản sửa, Supervisor kiểm tra lại các lệnh bắt buộc trên revision mới. Hãy kiểm tra môi trường và fixture trước khi giao việc, và để `auto_fix_on_failure` tắt trên các lệnh kiểm tra môi trường. Nếu gặp lỗi môi trường, kiểm thử vẫn thất bại sau lần sửa, hoặc hết giới hạn vòng sửa, Supervisor trả `VERIFICATION_BLOCKED` và giữ worktree. Plan cũ mặc định giữ quy trình review như trước.
 
@@ -171,3 +180,11 @@ Các test thường dùng fixture ACP và kiểm tra IPC, schema, lưu trạng t
 | `src/codex_agy/planning.py` | TaskPlan và dependency |
 | `src/codex_agy/workspace.py`, `verification.py` | Worktree, snapshot, diff và kiểm tra |
 | `scripts/`, `tests/`, `examples/` | Cài đặt Windows, test và kế hoạch mẫu |
+
+## Cấu hình Hybrid và số đo
+
+Plan mới dùng `review_strategy: "hybrid"`, `work_size: "small"`, `"medium"` hoặc `"large"`, và `verification_gate: true`. Việc nhỏ mặc định một checkpoint cuối, việc trung bình hai checkpoint. Nếu cần số khác, ghi lý do vào `checkpoint_exception_reason`. Mỗi milestone vẫn là một checkpoint, có thể chứa nhiều phase/task.
+
+Đánh dấu task quan trọng bằng `critical_change` có giá trị `architecture`, `database`, `authentication`, `payment` hoặc `integration`. Task này và task có `risk_level: "high"` phải nằm sau một milestone tiền nhiệm được review, chẳng hạn duyệt thiết kế hoặc hợp đồng API trước khi triển khai. Supervisor kiểm tra dependency đã khai báo và chặn bước tiếp theo đến khi được nghiệm thu. Việc nhận diện đúng rủi ro trong nội dung công việc vẫn thuộc trách nhiệm lập plan của Codex. Các plan cũ giữ chế độ `legacy` để tiếp tục tương thích.
+
+`get_execution_metrics` nhận `execution_id` và trả số lần vào review, yêu cầu sửa của Codex, lượt tự sửa, số MCP và IPC gắn với task. MCP được đếm tại wrapper của Supervisor, IPC bao gồm request do MCP chuyển tiếp nên hai số này có thể trùng hoạt động. Bộ đếm có hiệu lực từ khi cài tính năng; token Codex trả `null` vì Supervisor không nhận usage từ host. Đây là số đo giao thức, không suy ra phần trăm quota. Giới hạn vòng review được lưu riêng cho mỗi execution khi tạo để thay cấu hình sau đó không tự tăng số vòng.

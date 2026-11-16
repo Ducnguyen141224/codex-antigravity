@@ -53,7 +53,74 @@ class Supervisor:
         self.notify()
 
     async def dispatch(self, method, data):
+        task_id = getattr(data, "task_id", None)
+        if task_id and method != "record_mcp_call":
+            task = self.db.task(task_id)
+            self.db.write(
+                "INSERT INTO tool_calls(execution_id,method,source,created_at) VALUES(?,?,?,?)",
+                (task["execution_id"], method, "ipc", now()),
+            )
         return await getattr(self, method)(data)
+
+    async def record_mcp_call(self, request):
+        task = self.db.task(request.task_id)
+        self.db.write(
+            "INSERT INTO tool_calls(execution_id,method,source,created_at) VALUES(?,?,?,?)",
+            (task["execution_id"], request.method, "mcp", now()),
+        )
+        return {"recorded": True}
+
+    async def get_execution_metrics(self, request):
+        execution = self.db.one("SELECT id FROM executions WHERE id=?", (request.execution_id,))
+        if execution is None:
+            raise Problem("EXECUTION_NOT_FOUND", "Unknown execution.")
+        reviews = self.db.one(
+            "SELECT count(*) AS total FROM task_events e JOIN milestones m ON m.id=e.task_id "
+            "WHERE m.execution_id=? AND e.status='REVIEW_REQUIRED'",
+            (request.execution_id,),
+        )["total"]
+        calls = [
+            dict(row)
+            for row in self.db.all(
+                "SELECT source,method,count(*) AS count FROM tool_calls WHERE execution_id=? "
+                "GROUP BY source,method",
+                (request.execution_id,),
+            )
+        ]
+        policy = self.db.one(
+            "SELECT max_review_rounds FROM execution_policies WHERE execution_id=?",
+            (request.execution_id,),
+        )
+        decisions = {
+            row["decision"]: row["total"]
+            for row in self.db.all(
+                "SELECT r.decision,count(*) AS total FROM review_rounds r JOIN milestones m ON m.id=r.task_id "
+                "WHERE m.execution_id=? GROUP BY r.decision",
+                (request.execution_id,),
+            )
+        }
+        return {
+            "execution_id": request.execution_id,
+            "review_entries": reviews,
+            "tool_calls": calls,
+            "mcp_calls": sum(row["count"] for row in calls if row["source"] == "mcp"),
+            "ipc_calls": sum(row["count"] for row in calls if row["source"] == "ipc"),
+            "codex_fix_requests": decisions.get("FIX", 0),
+            "automatic_repairs": decisions.get("AUTO_FIX", 0),
+            "max_review_rounds": policy["max_review_rounds"] if policy else None,
+            "codex_token_usage": None,
+            "measurement_scope": "Task-bound calls recorded since this feature was installed; IPC includes MCP transport requests. Token usage requires host logs.",
+        }
+
+    def review_limit(self, task):
+        self.db.write(
+            "INSERT OR IGNORE INTO execution_policies VALUES(?,?)",
+            (task["execution_id"], self.settings.max_review_rounds),
+        )
+        return self.db.one(
+            "SELECT max_review_rounds FROM execution_policies WHERE execution_id=?",
+            (task["execution_id"],),
+        )["max_review_rounds"]
 
     def plan(self, plan_id, version=None):
         row = self.db.one(
@@ -79,9 +146,18 @@ class Supervisor:
         # Keep idempotency keys issued before the verification options were added valid.
         original = request.model_dump(mode="json")
         submitted = original["plan"]
+        for key, default in (
+            ("review_strategy", "legacy"),
+            ("work_size", "small"),
+            ("checkpoint_exception_reason", None),
+        ):
+            if submitted[key] == default:
+                del submitted[key]
         if not submitted["verification_gate"]:
             del submitted["verification_gate"]
         for owner in [submitted, *submitted["tasks"]]:
+            if owner.get("critical_change", "absent") is None:
+                del owner["critical_change"]
             if not owner["preflight_commands"]:
                 del owner["preflight_commands"]
             for command in owner["verification_commands"]:
@@ -212,6 +288,7 @@ class Supervisor:
                     "INSERT INTO task_events(task_id,status,created_at) VALUES(?,?,?)",
                     (task_id, State.CREATED, stamp),
                 )
+                self.review_limit(self.db.task(task_id))
                 for task in plan.tasks_for(milestone):
                     self.db.write("INSERT INTO tasks VALUES(?,?)", (task_id, task.task_id))
                 self.move(task_id, State.VALIDATED)
@@ -753,9 +830,19 @@ class Supervisor:
             if delta_path
             else None,
             "acceptance_criteria": [
-                *plan.acceptance_criteria,
+                *(
+                    plan.acceptance_criteria
+                    if plan.review_strategy != "hybrid"
+                    or task["ordinal"] == len(plan.milestones) - 1
+                    else []
+                ),
                 *(c for item in tasks for c in item.acceptance_criteria),
             ],
+            "overall_plan_acceptance_criteria": plan.acceptance_criteria,
+            "review_strategy": plan.review_strategy,
+            "checkpoint_description": next(
+                m.description for m in plan.milestones if m.milestone_id == task["milestone_id"]
+            ),
             "definition_of_done": plan.definition_of_done,
             "plan_id": plan.plan_id,
             "plan_version": plan.plan_version,
@@ -830,7 +917,7 @@ class Supervisor:
             valid
             and repairable
             and not already_retried
-            and round_no < self.settings.max_review_rounds
+            and round_no < self.review_limit(self.db.task(task_id))
         ):
             self.db.write(
                 "UPDATE review_rounds SET decision='AUTO_FIX',review_summary=? WHERE task_id=? AND round=?",
@@ -985,7 +1072,7 @@ class Supervisor:
                             "INSERT INTO review_findings VALUES(?,?,?,?)",
                             (task["id"], task["round"], ordinal, finding.model_dump_json()),
                         )
-                    if task["round"] >= self.settings.max_review_rounds:
+                    if task["round"] >= self.review_limit(task):
                         self.move(
                             task["id"],
                             State.BLOCKED,
@@ -1043,7 +1130,7 @@ class Supervisor:
             task = self.db.task(task_id)
             if task["status"] not in STOPPED:
                 raise Problem("INVALID_STATE", "Only a stopped task can be retried.")
-            if task["round"] >= self.settings.max_review_rounds:
+            if task["round"] >= self.review_limit(task):
                 raise Problem("REVIEW_LIMIT", "Create a revised plan for another execution.")
             self.check_ready(task)
             self.db.write(
